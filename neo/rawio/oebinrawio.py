@@ -31,13 +31,15 @@ Rules for creating a new class:
     * copy/paste from neo/io/exampleio.py
 
   4.Step 4 : IO test
-    * create a file in neo/test/iotest with the same previous name with "test_" prefix
+    * create a file in neo/test/iotest with the same previous name with "test_"
+prefix
     * copy/paste from neo/test/iotest/test_exampleio.py
 
 
 
 """
-from __future__ import unicode_literals, print_function, division, absolute_import
+from __future__ import unicode_literals, print_function, division, \
+    absolute_import
 
 from .baserawio import (BaseRawIO, _signal_channel_dtype, _unit_channel_dtype,
                         _event_channel_dtype)
@@ -101,51 +103,76 @@ class OEBinRawIO(BaseRawIO):
         return self.dirname
 
     def _parse_header(self):
-        # self.header = dict()
-        # self.header['nb_segment'] = 0
-        # self._rcrd_dir = list()
-        # for root, dirs, files in os.walk(self.dirname):
-        #     if 'settings.xml' in files:
-        #         self.header['nb_block'] = len(dirs)
-        #         # self._expt_dir = dirs
-        #     if 'structure.oebin' in files:
-        #         self.header['nb_segment'] += 1
-        #         self._rcrd_dir.append(root)
-
+        self._asig_memmap = dict()
+        self._asig_ts = dict()
+        self._events_ts = dict()
+        nb_block = 0
+        nb_segment = list()
         sig_channels = list()
+        event_channels = list()
         for bl_index, bl_dir in enumerate(os.listdir(self.dirname)):
             if os.path.isdir(os.path.join(self.dirname, bl_dir)):
-                for seg_index, seg_dir in enumerate(os.listdir(os.path.join(self.dirname, bl_dir))):
-                    with open(os.path.join(self.dirname, bl_dir, seg_dir, 'structure.oebin')) as f:
+                nb_block += 1
+                self._asig_memmap[bl_index] = dict()
+                self._asig_ts[bl_index] = dict()
+                self._events_ts[bl_index] = dict()
+                nb_segment.append(0)
+                for seg_index, seg_dir in enumerate(os.listdir(os.path.join(
+                                                               self.dirname,
+                                                               bl_dir))):
+                    nb_segment[bl_index] += 1
+                    with open(os.path.join(self.dirname, bl_dir, seg_dir,
+                        'structure.oebin')) as f:
                         seg_dict = json.load(f)
+                    # continuous
                     seg_sr = seg_dict['continuous'][0]['sample_rate']
-                    for chan_id, chan_dict in enumerate(seg_dict['continuous'][0]['channels']):
+                    proc_dir = seg_dict['continuous'][0]['folder_name']
+                    nchan = seg_dict['continuous'][0]['num_channels']
+                    for chan_id, chan_dict in enumerate(
+                        seg_dict['continuous'][0]['channels']):
                         dtype = 'int16'
                         units = chan_dict['units']
                         gain = chan_dict['bit_volts']
                         offset = 0.
                         chan_name = chan_dict['channel_name']
                         group_id = 0.
-                        curr_chan = (chan_name, chan_id, seg_sr, dtype, units, gain, offset, group_id)
+                        curr_chan = (chan_name, chan_id, seg_sr, dtype,
+                                     units, gain, offset, group_id)
                         if curr_chan not in sig_channels:
                             sig_channels.append(curr_chan)
-                    
+                    timestamp_file = os.path.join(self.dirname, bl_dir, seg_dir,
+                                                  'continuous', proc_dir,
+                                                  'timestamps.npy')
+                    self._asig_ts[bl_index][seg_index] = np.load(
+                        timestamp_file, mmap_mode='r')
+                    nsamps = self._asig_ts[bl_index][seg_index].shape[0]
+                    data_file = os.path.join(
+                        self.dirname, bl_dir, seg_dir, 'continuous', proc_dir,
+                        'continuous.dat')
+                    self._asig_memmap[bl_index][seg_index] = np.memmap(
+                        data_file, dtype='int16', mode='r',
+                        shape=(nchan, nsamps))
+                    # events
+                    self._events_ts[bl_index][seg_index] = list()
+                    for chan_id, chan_dict in enumerate(seg_dict['events']):
+                        proc_dir = chan_dict['folder_name']
+                        name = chan_dict['channel_name']
+                        event_path = os.path.join(self.dirname, bl_dir, seg_dir,
+                                                 'events', proc_dir)
+                        self._events_ts[bl_index][seg_index].append(np.load(
+                            os.path.join(event_path, 'timestamps.npy'),
+                            mmap_mode='r'
+                        ))
+                        files = [file for file in os.listdir(event_path)
+                            if os.path.isfile(os.path.join(event_path, file))]
+                        event_type = 'event'
+                        if (name, chan_id, event_type) not in event_channels:
+                            event_channels.append((name, chan_id, event_type))
+                    # spikes
+                    # TODO: spikes
+        event_channels = np.array(event_channels, dtype=_event_channel_dtype)
         sig_channels = np.array(sig_channels, dtype=_signal_channel_dtype)
 
-        import pdb; pdb.set_trace()
-        # This is the central of a RawIO
-        # we need to collect in the original format all
-        # informations needed for further fast acces
-        # at any place in the file
-        # In short _parse_header can be slow but
-        # _get_analogsignal_chunk need to be as fast as possible
-
-        # creating units channels
-        # This is mandatory!!!!
-        # Note that if there is no waveform at all in the file
-        # then wf_units/wf_gain/wf_offset/wf_left_sweep/wf_sampling_rate
-        # can be set to any value because _spike_raw_waveforms
-        # will return None
         unit_channels = []
         for c in range(3):
             unit_name = 'unit{}'.format(c)
@@ -159,51 +186,14 @@ class OEBinRawIO(BaseRawIO):
                                   wf_offset, wf_left_sweep, wf_sampling_rate))
         unit_channels = np.array(unit_channels, dtype=_unit_channel_dtype)
 
-        # creating event/epoch channel
-        # This is mandatory!!!!
-        # In RawIO epoch and event they are dealt the same way.
-        event_channels = []
-        event_channels.append(('Some events', 'ev_0', 'event'))
-        event_channels.append(('Some epochs', 'ep_1', 'epoch'))
-        event_channels = np.array(event_channels, dtype=_event_channel_dtype)
-
-        # fille into header dict
-        # This is mandatory!!!!!
-        self.header = {}
-        self.header['nb_block'] = 2
-        self.header['nb_segment'] = [2, 3]
+        self.header = dict()
+        self.header['nb_block'] = nb_block
+        self.header['nb_segment'] = nb_segment
         self.header['signal_channels'] = sig_channels
         self.header['unit_channels'] = unit_channels
         self.header['event_channels'] = event_channels
-
-        # insert some annotation at some place
-        # at neo.io level IO are free to add some annoations
-        # to any object. To keep this functionality with the wrapper
-        # BaseFromRaw you can add annoations in a nested dict.
+        # import pdb; pdb.set_trace()
         self._generate_minimal_annotations()
-        # If you are a lazy dev you can stop here.
-        for block_index in range(2):
-            bl_ann = self.raw_annotations['blocks'][block_index]
-            bl_ann['name'] = 'Block #{}'.format(block_index)
-            bl_ann['block_extra_info'] = 'This is the block {}'.format(block_index)
-            for seg_index in range([2, 3][block_index]):
-                seg_ann = bl_ann['segments'][seg_index]
-                seg_ann['name'] = 'Seg #{} Block #{}'.format(
-                    seg_index, block_index)
-                seg_ann['seg_extra_info'] = 'This is the seg {} of block {}'.format(
-                    seg_index, block_index)
-                for c in range(16):
-                    anasig_an = seg_ann['signals'][c]
-                    anasig_an['info'] = 'This is a good signals'
-                for c in range(3):
-                    spiketrain_an = seg_ann['units'][c]
-                    spiketrain_an['quality'] = 'Good!!'
-                for c in range(2):
-                    event_an = seg_ann['events'][c]
-                    if c == 0:
-                        event_an['nickname'] = 'Miss Event 0'
-                    elif c == 1:
-                        event_an['nickname'] = 'MrEpoch 1'
 
     def _segment_t_start(self, block_index, seg_index):
         # this must return an float scale in second
