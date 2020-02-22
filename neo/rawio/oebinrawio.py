@@ -42,6 +42,9 @@ from __future__ import unicode_literals, print_function, division, absolute_impo
 from .baserawio import (BaseRawIO, _signal_channel_dtype, _unit_channel_dtype,
                         _event_channel_dtype)
 
+import os
+import json
+
 import numpy as np
 
 
@@ -98,37 +101,44 @@ class OEBinRawIO(BaseRawIO):
         return self.dirname
 
     def _parse_header(self):
+        # self.header = dict()
+        # self.header['nb_segment'] = 0
+        # self._rcrd_dir = list()
+        # for root, dirs, files in os.walk(self.dirname):
+        #     if 'settings.xml' in files:
+        #         self.header['nb_block'] = len(dirs)
+        #         # self._expt_dir = dirs
+        #     if 'structure.oebin' in files:
+        #         self.header['nb_segment'] += 1
+        #         self._rcrd_dir.append(root)
+
+        sig_channels = list()
+        for bl_index, bl_dir in enumerate(os.listdir(self.dirname)):
+            if os.path.isdir(os.path.join(self.dirname, bl_dir)):
+                for seg_index, seg_dir in enumerate(os.listdir(os.path.join(self.dirname, bl_dir))):
+                    with open(os.path.join(self.dirname, bl_dir, seg_dir, 'structure.oebin')) as f:
+                        seg_dict = json.load(f)
+                    seg_sr = seg_dict['continuous'][0]['sample_rate']
+                    for chan_id, chan_dict in enumerate(seg_dict['continuous'][0]['channels']):
+                        dtype = 'int16'
+                        units = chan_dict['units']
+                        gain = chan_dict['bit_volts']
+                        offset = 0.
+                        chan_name = chan_dict['channel_name']
+                        group_id = 0.
+                        curr_chan = (chan_name, chan_id, seg_sr, dtype, units, gain, offset, group_id)
+                        if curr_chan not in sig_channels:
+                            sig_channels.append(curr_chan)
+                    
+        sig_channels = np.array(sig_channels, dtype=_signal_channel_dtype)
+
+        import pdb; pdb.set_trace()
         # This is the central of a RawIO
         # we need to collect in the original format all
         # informations needed for further fast acces
         # at any place in the file
         # In short _parse_header can be slow but
         # _get_analogsignal_chunk need to be as fast as possible
-
-        # create signals channels information
-        # This is mandatory!!!!
-        # gain/offset/units are really important because
-        # the scaling to real value will be done with that
-        # at the end real_signal = (raw_signal* gain + offset) * pq.Quantity(units)
-        sig_channels = []
-        for c in range(16):
-            ch_name = 'ch{}'.format(c)
-            # our channel id is c+1 just for fun
-            # Note that chan_id should be realated to
-            # original channel id in the file format
-            # so that the end user should not be lost when reading datasets
-            chan_id = c + 1
-            sr = 10000.  # Hz
-            dtype = 'int16'
-            units = 'uV'
-            gain = 1000. / 2 ** 16
-            offset = 0.
-            # group_id isonly for special cases when channel have diferents
-            # sampling rate for instance. See TdtIO for that.
-            # Here this is the general case :all channel have the same characteritics
-            group_id = 0
-            sig_channels.append((ch_name, chan_id, sr, dtype, units, gain, offset, group_id))
-        sig_channels = np.array(sig_channels, dtype=_signal_channel_dtype)
 
         # creating units channels
         # This is mandatory!!!!
