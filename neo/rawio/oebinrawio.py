@@ -103,19 +103,21 @@ class OEBinRawIO(BaseRawIO):
         return self.dirname
 
     def _parse_header(self):
-        self._asig_memmap = dict()
-        self._asig_ts = dict()
-        self._events_ts = dict()
         nb_block = 0
-        nb_segment = list()
-        sig_channels = list()
-        event_channels = list()
+        nb_segment = []
+        sig_channels = []
+        event_channels = []
+        unit_channels = []
+        self._asig_mmap = {}
+        self._events_mmap = {}
+        self._unit_mmap = {}
+
         for bl_index, bl_dir in enumerate(os.listdir(self.dirname)):
             if os.path.isdir(os.path.join(self.dirname, bl_dir)):
                 nb_block += 1
-                self._asig_memmap[bl_index] = dict()
-                self._asig_ts[bl_index] = dict()
-                self._events_ts[bl_index] = dict()
+                self._asig_mmap[bl_index] = {}
+                self._events_mmap[bl_index] = {}
+                self._unit_mmap[bl_index] = {}
                 nb_segment.append(0)
                 for seg_index, seg_dir in enumerate(os.listdir(os.path.join(
                                                                self.dirname,
@@ -124,6 +126,7 @@ class OEBinRawIO(BaseRawIO):
                     with open(os.path.join(self.dirname, bl_dir, seg_dir,
                         'structure.oebin')) as f:
                         seg_dict = json.load(f)
+
                     # continuous
                     seg_sr = seg_dict['continuous'][0]['sample_rate']
                     proc_dir = seg_dict['continuous'][0]['folder_name']
@@ -140,50 +143,91 @@ class OEBinRawIO(BaseRawIO):
                                      units, gain, offset, group_id)
                         if curr_chan not in sig_channels:
                             sig_channels.append(curr_chan)
+
+                    self._asig_mmap[bl_index][seg_index] = {}
                     timestamp_file = os.path.join(self.dirname, bl_dir, seg_dir,
                                                   'continuous', proc_dir,
                                                   'timestamps.npy')
-                    self._asig_ts[bl_index][seg_index] = np.load(
+                    self._asig_mmap[bl_index][seg_index]['timestamps'] = np.load(
                         timestamp_file, mmap_mode='r')
-                    nsamps = self._asig_ts[bl_index][seg_index].shape[0]
+                    nsamps = self._asig_mmap[bl_index][seg_index]['timestamps'].shape[0]
                     data_file = os.path.join(
                         self.dirname, bl_dir, seg_dir, 'continuous', proc_dir,
                         'continuous.dat')
-                    self._asig_memmap[bl_index][seg_index] = np.memmap(
+                    self._asig_mmap[bl_index][seg_index]['data'] = np.memmap(
                         data_file, dtype='int16', mode='r',
                         shape=(nchan, nsamps))
+
                     # events
-                    self._events_ts[bl_index][seg_index] = list()
+                    self._events_mmap[bl_index][seg_index] = []
                     for chan_id, chan_dict in enumerate(seg_dict['events']):
                         proc_dir = chan_dict['folder_name']
                         name = chan_dict['channel_name']
-                        event_path = os.path.join(self.dirname, bl_dir, seg_dir,
-                                                 'events', proc_dir)
-                        self._events_ts[bl_index][seg_index].append(np.load(
-                            os.path.join(event_path, 'timestamps.npy'),
-                            mmap_mode='r'
-                        ))
-                        files = [file for file in os.listdir(event_path)
-                            if os.path.isfile(os.path.join(event_path, file))]
                         event_type = 'event'
                         if (name, chan_id, event_type) not in event_channels:
                             event_channels.append((name, chan_id, event_type))
-                    # spikes
-                    # TODO: spikes
-        event_channels = np.array(event_channels, dtype=_event_channel_dtype)
-        sig_channels = np.array(sig_channels, dtype=_signal_channel_dtype)
 
-        unit_channels = []
-        for c in range(3):
-            unit_name = 'unit{}'.format(c)
-            unit_id = '#{}'.format(c)
-            wf_units = 'uV'
-            wf_gain = 1000. / 2 ** 16
-            wf_offset = 0.
-            wf_left_sweep = 20
-            wf_sampling_rate = 10000.
-            unit_channels.append((unit_name, unit_id, wf_units, wf_gain,
-                                  wf_offset, wf_left_sweep, wf_sampling_rate))
+                        self._events_mmap[bl_index][seg_index].append({})
+                        event_path = os.path.join(self.dirname, bl_dir, seg_dir,
+                                                 'events', proc_dir)
+                        self._events_mmap[bl_index][seg_index][chan_id]['timestamps'] = np.load(
+                            os.path.join(event_path, 'timestamps.npy'), mmap_mode='r')
+                        self._events_mmap[bl_index][seg_index][chan_id]['channels'] = np.load(
+                            os.path.join(event_path, 'channels.npy'), mmap_mode='r')
+                        if os.path.isfile(os.path.join(event_path, 'metadata.npy')):
+                            self._events_mmap[bl_index][seg_index][chan_id]['metadata'] = np.load(
+                                os.path.join(event_path, 'metadata.npy'), mmap_mode='r')
+                        if os.path.isfile(os.path.join(event_path, 'text.npy')):
+                            self._events_mmap[bl_index][seg_index][chan_id]['type'] = 'text'
+                            self._events_mmap[bl_index][seg_index][chan_id]['text'] = np.load(
+                                os.path.join(event_path, 'text.npy'), mmap_mode='r')
+                        if os.path.isfile(os.path.join(event_path, 'data_array.npy')):
+                            self._events_mmap[bl_index][seg_index][chan_id]['type'] = 'binary'
+                            self._events_mmap[bl_index][seg_index][chan_id]['data_array'] = np.load(
+                                os.path.join(event_path, 'data_array.npy'), mmap_mode='r')
+                        if os.path.isfile(os.path.join(event_path, 'channel_states.npy')):
+                            self._events_mmap[bl_index][seg_index][chan_id]['type'] = 'TTL'
+                            self._events_mmap[bl_index][seg_index][chan_id]['channel_states'] = np.load(
+                                os.path.join(event_path, 'channel_states.npy'), mmap_mode='r')
+                        if os.path.isfile(os.path.join(event_path, 'full_words.npy')):
+                            self._events_mmap[bl_index][seg_index][chan_id]['full_words'] = np.load(
+                                os.path.join(event_path, 'full_words.npy'), mmap_mode='r')
+
+                    # spikes
+                    self._unit_mmap[bl_index][seg_index] = []
+                    for spk_grp_id, grp_dict in enumerate(seg_dict['spikes']):
+                        proc_dir = grp_dict['folder_name']
+                        proc_name = grp_dict['source_processor']
+                        nb_unit = grp_dict['num_channels']
+                        wf_sr = grp_dict['sample_rate']
+                        wf_left_sweep = grp_dict['pre_peak_samples']
+                        wf_gain = 0.195  # not reported by format # TODO: read params from associated data processor
+                        wf_offset = 0.
+                        wf_units = 'uV'
+                        for unit_id, unit_dict in enumerate(grp_dict['channels']):
+                            unit_name = unit_dict['channel_name']
+                            curr_unit = (unit_name, unit_id, wf_units, wf_gain,
+                                        wf_offset, wf_left_sweep, wf_sr)
+                            if curr_unit not in unit_channels:
+                                unit_channels.append(curr_unit)
+
+                        self._unit_mmap[bl_index][seg_index].append({})
+                        spikes_path = os.path.join(self.dirname, bl_dir, seg_dir,
+                                                  'spikes', proc_dir)
+                        self._unit_mmap[bl_index][seg_index][spk_grp_id]['spike_times'] = np.load(
+                            os.path.join(spikes_path, 'spike_times.npy'), mmap_mode='r')
+                        self._unit_mmap[bl_index][seg_index][spk_grp_id]['spike_electrode_id'] = np.load(
+                            os.path.join(spikes_path, 'spike_electrode_indices.npy'), mmap_mode='r')
+                        self._unit_mmap[bl_index][seg_index][spk_grp_id]['spike_cluster_id'] = np.load(
+                            os.path.join(spikes_path, 'spike_clusters.npy'), mmap_mode='r')
+                        self._unit_mmap[bl_index][seg_index][spk_grp_id]['spike_waveforms'] = np.load(
+                            os.path.join(spikes_path, 'spike_waveforms.npy'), mmap_mode='r')
+                        if os.path.isfile(os.path.join(spikes_path, 'metadata.npy')):
+                            self._unit_mmap[bl_index][seg_index][spk_grp_id]['metadata'] = np.load(
+                            os.path.join(spikes_path, 'metadata.npy'), mmap_mode='r')
+
+        sig_channels = np.array(sig_channels, dtype=_signal_channel_dtype)
+        event_channels = np.array(event_channels, dtype=_event_channel_dtype)
         unit_channels = np.array(unit_channels, dtype=_unit_channel_dtype)
 
         self.header = dict()
@@ -192,7 +236,6 @@ class OEBinRawIO(BaseRawIO):
         self.header['signal_channels'] = sig_channels
         self.header['unit_channels'] = unit_channels
         self.header['event_channels'] = event_channels
-        # import pdb; pdb.set_trace()
         self._generate_minimal_annotations()
 
     def _segment_t_start(self, block_index, seg_index):
