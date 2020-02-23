@@ -127,8 +127,9 @@ class OEBinRawIO(BaseRawIO):
                         'structure.oebin')) as f:
                         seg_dict = json.load(f)
 
-                    # continuous
+                    # continuous header
                     seg_sr = seg_dict['continuous'][0]['sample_rate']
+                    self._sampling_rate = seg_sr
                     proc_dir = seg_dict['continuous'][0]['folder_name']
                     nchan = seg_dict['continuous'][0]['num_channels']
                     for chan_id, chan_dict in enumerate(
@@ -144,6 +145,7 @@ class OEBinRawIO(BaseRawIO):
                         if curr_chan not in sig_channels:
                             sig_channels.append(curr_chan)
 
+                    # continuous memmap
                     self._asig_mmap[bl_index][seg_index] = {}
                     timestamp_file = os.path.join(self.dirname, bl_dir, seg_dir,
                                                   'continuous', proc_dir,
@@ -161,12 +163,14 @@ class OEBinRawIO(BaseRawIO):
                     # events
                     self._events_mmap[bl_index][seg_index] = []
                     for chan_id, chan_dict in enumerate(seg_dict['events']):
+                        # events header
                         proc_dir = chan_dict['folder_name']
                         name = chan_dict['channel_name']
                         event_type = 'event'
                         if (name, chan_id, event_type) not in event_channels:
                             event_channels.append((name, chan_id, event_type))
 
+                        # events memmap
                         self._events_mmap[bl_index][seg_index].append({})
                         event_path = os.path.join(self.dirname, bl_dir, seg_dir,
                                                  'events', proc_dir)
@@ -196,6 +200,7 @@ class OEBinRawIO(BaseRawIO):
                     # spikes
                     self._unit_mmap[bl_index][seg_index] = []
                     for spk_grp_id, grp_dict in enumerate(seg_dict['spikes']):
+                        # spikes header
                         proc_dir = grp_dict['folder_name']
                         proc_name = grp_dict['source_processor']
                         nb_unit = grp_dict['num_channels']
@@ -211,6 +216,7 @@ class OEBinRawIO(BaseRawIO):
                             if curr_unit not in unit_channels:
                                 unit_channels.append(curr_unit)
 
+                        # spikes memmap
                         self._unit_mmap[bl_index][seg_index].append({})
                         spikes_path = os.path.join(self.dirname, bl_dir, seg_dir,
                                                   'spikes', proc_dir)
@@ -238,17 +244,25 @@ class OEBinRawIO(BaseRawIO):
         self.header['event_channels'] = event_channels
         self._generate_minimal_annotations()
 
+        self._t_starts = []
+        self._t_stops = []
+        for bl in range(self.header['nb_block']):
+            self._t_starts.append([])
+            self._t_stops.append([])
+            for seg in range(self.header['nb_segment'][bl]):
+                # import ipdb; ipdb.set_trace()
+                self._t_starts[bl].append(self._asig_mmap[bl][seg]['timestamps'][0])
+                self._t_stops[bl].append(self._asig_mmap[bl][seg]['timestamps'][-1])
+
     def _segment_t_start(self, block_index, seg_index):
         # this must return an float scale in second
         # this t_start will be shared by all object in the segment
         # except AnalogSignal
-        all_starts = [[0., 15.], [0., 20., 60.]]
-        return all_starts[block_index][seg_index]
+        return self._t_starts[block_index][seg_index] / self._sampling_rate
 
     def _segment_t_stop(self, block_index, seg_index):
         # this must return an float scale in second
-        all_stops = [[10., 25.], [10., 30., 70.]]
-        return all_stops[block_index][seg_index]
+        return self._t_stops[block_index][seg_index] / self._sampling_rate
 
     def _get_signal_size(self, block_index, seg_index, channel_indexes=None):
         # we are lucky: signals in all segment have the same shape!! (10.0 seconds)
@@ -257,7 +271,7 @@ class OEBinRawIO(BaseRawIO):
 
         # Note that channel_indexes can be ignored for most cases
         # except for several sampling rate.
-        return 100000
+        return self._asig_mmap[block_index][seg_index]['data'].shape[1]
 
     def _get_signal_t_start(self, block_index, seg_index, channel_indexes):
         # This give the t_start of signals.
