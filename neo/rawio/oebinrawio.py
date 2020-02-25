@@ -199,17 +199,20 @@ class OEBinRawIO(BaseRawIO):
 
                     # spikes
                     self._unit_mmap[bl_index][seg_index] = []
-                    for spk_grp_id, grp_dict in enumerate(seg_dict['spikes']):
+                    for spk_proc_id, grp_dict in enumerate(seg_dict['spikes']):
                         # spikes header
                         proc_dir = grp_dict['folder_name']
                         proc_name = grp_dict['source_processor']
                         nb_unit = grp_dict['num_channels']
                         wf_sr = grp_dict['sample_rate']
                         wf_left_sweep = grp_dict['pre_peak_samples']
+                        wf_right_sweep = grp_dict['post_peak_samples']
                         wf_gain = 0.195  # not reported by format # TODO: read params from associated data processor
                         wf_offset = 0.
                         wf_units = 'uV'
+                        self._unit_proc = {}
                         for unit_id, unit_dict in enumerate(grp_dict['channels']):
+                            self._unit_proc[unit_id] = spk_proc_id
                             unit_name = unit_dict['channel_name']
                             curr_unit = (unit_name, unit_id, wf_units, wf_gain,
                                         wf_offset, wf_left_sweep, wf_sr)
@@ -220,16 +223,16 @@ class OEBinRawIO(BaseRawIO):
                         self._unit_mmap[bl_index][seg_index].append({})
                         spikes_path = os.path.join(self.dirname, bl_dir, seg_dir,
                                                   'spikes', proc_dir)
-                        self._unit_mmap[bl_index][seg_index][spk_grp_id]['spike_times'] = np.load(
+                        self._unit_mmap[bl_index][seg_index][spk_proc_id]['spike_times'] = np.load(
                             os.path.join(spikes_path, 'spike_times.npy'), mmap_mode='r')
-                        self._unit_mmap[bl_index][seg_index][spk_grp_id]['spike_electrode_id'] = np.load(
+                        self._unit_mmap[bl_index][seg_index][spk_proc_id]['spike_electrode_id'] = np.load(
                             os.path.join(spikes_path, 'spike_electrode_indices.npy'), mmap_mode='r')
-                        self._unit_mmap[bl_index][seg_index][spk_grp_id]['spike_cluster_id'] = np.load(
+                        self._unit_mmap[bl_index][seg_index][spk_proc_id]['spike_cluster_id'] = np.load(
                             os.path.join(spikes_path, 'spike_clusters.npy'), mmap_mode='r')
-                        self._unit_mmap[bl_index][seg_index][spk_grp_id]['spike_waveforms'] = np.load(
+                        self._unit_mmap[bl_index][seg_index][spk_proc_id]['spike_waveforms'] = np.load(
                             os.path.join(spikes_path, 'spike_waveforms.npy'), mmap_mode='r')
                         if os.path.isfile(os.path.join(spikes_path, 'metadata.npy')):
-                            self._unit_mmap[bl_index][seg_index][spk_grp_id]['metadata'] = np.load(
+                            self._unit_mmap[bl_index][seg_index][spk_proc_id]['metadata'] = np.load(
                             os.path.join(spikes_path, 'metadata.npy'), mmap_mode='r')
 
         sig_channels = np.array(sig_channels, dtype=_signal_channel_dtype)
@@ -265,10 +268,7 @@ class OEBinRawIO(BaseRawIO):
         return self._t_stops[block_index][seg_index] / self._sampling_rate
 
     def _get_signal_size(self, block_index, seg_index, channel_indexes=None):
-        # we are lucky: signals in all segment have the same shape!! (10.0 seconds)
-        # it is not always the case
         # this must return an int = the number of sample
-
         # Note that channel_indexes can be ignored for most cases
         # except for several sampling rate.
         return self._asig_mmap[block_index][seg_index]['data'].shape[1]
@@ -281,9 +281,6 @@ class OEBinRawIO(BaseRawIO):
 
         # Note that channel_indexes can be ignored for most cases
         # except for several sampling rate.
-
-        # Here this is the same.
-        # this is not always the case
         return self._segment_t_start(block_index, seg_index)
 
     def _get_analogsignal_chunk(self, block_index, seg_index, i_start, i_stop, channel_indexes):
@@ -294,60 +291,38 @@ class OEBinRawIO(BaseRawIO):
         # This must return the orignal dtype. No conversion here.
         # This must as fast as possible.
         # Everything that can be done in _parse_header() must not be here.
-
-        # Here we are lucky:  our signals is always zeros!!
-        # it is not always the case
-        # internally signals are int16
         # convertion to real units is done with self.header['signal_channels']
-
         if i_start is None:
-            i_start = 0
+            i_start = self._t_starts[block_index][seg_index]
         if i_stop is None:
-            i_stop = 100000
-
-        assert i_start >= 0, "I don't like your jokes"
-        assert i_stop <= 100000, "I don't like your jokes"
-
+            i_stop = self._t_stops[block_index][seg_index]
         if channel_indexes is None:
-            nb_chan = 16
-        else:
-            nb_chan = len(channel_indexes)
-        raw_signals = np.zeros((i_stop - i_start, nb_chan), dtype='int16')
-        return raw_signals
+            channel_indexes = range(self._asig_mmap[block_index][seg_index]['data'].shape[0])
+        return self._asig_mmap[block_index][seg_index]['data'][channel_indexes, i_start:i_stop]
 
     def _spike_count(self, block_index, seg_index, unit_index):
         # Must return the nb of spike for given (block_index, seg_index, unit_index)
-        # we are lucky:  our units have all the same nb of spikes!!
-        # it is not always the case
-        nb_spikes = 20
-        return nb_spikes
+        spk_proc_id = self._get_spk_proc_id(unit_index)
+        return self._unit_mmap[block_index][seg_index][spk_proc_id]['spike_times']\
+            [self._unit_mmap[block_index][seg_index][spk_proc_id]['spike_electrode_id']\
+            ==unit_index].shape[0]
 
     def _get_spike_timestamps(self, block_index, seg_index, unit_index, t_start, t_stop):
-        # In our IO, timstamp are internally coded 'int64' and they
-        # represent the index of the signals 10kHz
-        # we are lucky: spikes have the same discharge in all segments!!
-        # incredible neuron!! This is not always the case
-
-        # the same clip t_start/t_start must be used in _spike_raw_waveforms()
-
-        ts_start = (self._segment_t_start(block_index, seg_index) * 10000)
-
-        spike_timestamps = np.arange(0, 10000, 500) + ts_start
-
-        if t_start is not None or t_stop is not None:
-            # restricte spikes to given limits (in seconds)
-            lim0 = int(t_start * 10000)
-            lim1 = int(t_stop * 10000)
-            mask = (spike_timestamps >= lim0) & (spike_timestamps <= lim1)
-            spike_timestamps = spike_timestamps[mask]
-
-        return spike_timestamps
+        proc_id = self._get_spk_proc_id(unit_index)
+        spike_ts = self._unit_mmap[block_index][seg_index][proc_id]['spike_times']\
+            [self._unit_mmap[block_index][seg_index][proc_id]['spike_electrode_id']\
+            ==unit_index]
+        if t_start is not None:
+            spike_ts = spike_ts[spike_ts >= int(t_start)]
+        if t_stop is not None:
+            spike_ts = spike_ts[spike_ts <= int(t_stop)]
+        return spike_ts
 
     def _rescale_spike_timestamp(self, spike_timestamps, dtype):
         # must rescale to second a particular spike_timestamps
         # with a fixed dtype so the user can choose the precisino he want.
         spike_times = spike_timestamps.astype(dtype)
-        spike_times /= 10000.  # because 10kHz
+        spike_times /= self._sampling_rate  # because 10kHz
         return spike_times
 
     def _get_spike_raw_waveforms(self, block_index, seg_index, unit_index, t_start, t_stop):
@@ -355,76 +330,42 @@ class OEBinRawIO(BaseRawIO):
         # in the original dtype
         # this must be as fast as possible.
         # the same clip t_start/t_start must be used in _spike_timestamps()
-
-        # If there there is no waveform supported in the
-        # IO them _spike_raw_waveforms must return None
-
-        # In our IO waveforms come from all channels
-        # they are int16
-        # convertion to real units is done with self.header['unit_channels']
-        # Here, we have a realistic case: all waveforms are only noise.
-        # it is not always the case
-        # we 20 spikes with a sweep of 50 (5ms)
-
-        # trick to get how many spike in the slice
-        ts = self._get_spike_timestamps(block_index, seg_index, unit_index, t_start, t_stop)
-        nb_spike = ts.size
-
-        np.random.seed(2205)  # a magic number (my birthday)
-        waveforms = np.random.randint(low=-2**4, high=2**4, size=nb_spike * 50, dtype='int16')
-        waveforms = waveforms.reshape(nb_spike, 1, 50)
-        return waveforms
+        proc_id = self._get_spk_proc_id(unit_index)
+        # which spikes to return
+        spk_chan_bool = self._unit_mmap[block_index][seg_index][proc_id]['spike_electrode_id'] == unit_index
+        if t_start is not None:
+            spk_t_start_bool = spike_ts >= int(t_start)
+        else:
+            spk_t_start_bool = spk_chan_bool
+        if t_stop is not None:
+            spk_t_stop_bool = spike_ts[spike_ts <= int(t_stop)]
+        else:
+            spk_t_stop_bool = spk_chan_bool
+        wf =  self._unit_mmap[block_index][seg_index][proc_id]['spike_waveforms'][spk_chan_bool & spk_t_start_bool & spk_t_stop_bool, :]
+        return np.reshape(wf, (wf.shape[0], 1, wf.shape[1]))
 
     def _event_count(self, block_index, seg_index, event_channel_index):
-        # event and spike are very similar
-        # we have 2 event channels
-        if event_channel_index == 0:
-            # event channel
-            return 6
-        elif event_channel_index == 1:
-            # epoch channel
-            return 10
+        return self._events_mmap[block_index][seg_index][event_channel_index]['timestamps'].shape[0]
 
     def _get_event_timestamps(self, block_index, seg_index, event_channel_index, t_start, t_stop):
-        # the main difference between spike channel and event channel
-        # is that for here we have 3 numpy array timestamp, durations, labels
-        # durations must be None for 'event'
-        # label must a dtype ='U'
-
-        # in our IO event are directly coded in seconds
-        seg_t_start = self._segment_t_start(block_index, seg_index)
-        if event_channel_index == 0:
-            timestamp = np.arange(0, 6, dtype='float64') + seg_t_start
-            durations = None
-            labels = np.array(['trigger_a', 'trigger_b'] * 3, dtype='U12')
-        elif event_channel_index == 1:
-            timestamp = np.arange(0, 10, dtype='float64') + .5 + seg_t_start
-            durations = np.ones((10), dtype='float64') * .25
-            labels = np.array(['zoneX'] * 5 + ['zoneZ'] * 5, dtype='U12')
-
+        timestamps = self._events_mmap[block_index][seg_index][event_channel_index]['timestamps']
         if t_start is not None:
-            keep = timestamp >= t_start
-            timestamp, labels = timestamp[keep], labels[keep]
-            if durations is not None:
-                durations = durations[keep]
-
+            timestamps = timestamps[timestamps>=t_start * self._sampling_rate]
         if t_stop is not None:
-            keep = timestamp <= t_stop
-            timestamp, labels = timestamp[keep], labels[keep]
-            if durations is not None:
-                durations = durations[keep]
-
-        return timestamp, durations, labels
+            timestamps = timestamps[timestamps<=t_stop * self._sampling_rate]
+        duration = None
+        # import ipdb; ipdb.set_trace()
+        labels = ['{}'.format(self.header['event_channels'][event_channel_index][0]) for ts in timestamps]
+        return timestamps, duration, labels
 
     def _rescale_event_timestamp(self, event_timestamps, dtype):
-        # must rescale to second a particular event_timestamps
-        # with a fixed dtype so the user can choose the precisino he want.
-
-        # really easy here because in our case it is already seconds
-        event_times = event_timestamps.astype(dtype)
-        return event_times
+        return event_timestamps.astype(dtype) / self._sampling_rate
 
     def _rescale_epoch_duration(self, raw_duration, dtype):
-        # really easy here because in our case it is already seconds
-        durations = raw_duration.astype(dtype)
-        return durations
+        return None
+
+    def _get_spk_proc_id(self, unit_index):
+        return self._unit_proc[unit_index]
+
+    def _get_event_proc_id(self, event_channel_index):
+        return self._unit_proc[unit_index]
